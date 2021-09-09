@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+import numpy as np
+import cv2
+import argparse
+import multiprocessing as mp
+import threading
+import time
+from math import ceil, floor
+from PIL import Image, ImageFont, ImageDraw
+
+class converter(object):
+    def __init__(self, obj):
+        self.source_file = obj.infile
+        self.output_file = obj.outfile
+        self.video_format = obj.codec
+        self.output_resolution = obj.size
+        self.output_framerate = obj.framerate
+        self.font_name = obj.font
+        self.output_characters = obj.characters
+        self.font_px = obj.text_size
+        self.threads = obj.threads
+        
+
+    def prerender(self):
+        self.video_source = cv2.VideoCapture(self.source_file)
+        self.input_resolution = (int(self.video_source.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                                int(self.video_source.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        self.input_framerate = self.video_source.get(cv2.CAP_PROP_FPS)
+        self.input_frame_count = self.video_source.get(cv2.CAP_PROP_FRAME_COUNT)
+        #Prepare input + input constants
+
+        fourcc = cv2.VideoWriter_fourcc(*self.video_format)
+        if self.output_resolution is None:
+            self.output_resolution = self.input_resolution
+        print(self.output_resolution)
+        self.video_output = cv2.VideoWriter(self.output_file, fourcc, self.output_framerate, self.output_resolution)
+        self.scale_factor = tuple(round(self.input_resolution[d] / self.output_resolution[d]) for d in range(2))
+        self.framerate_div = round(self.input_framerate / self.output_framerate)
+        self.output_frame_count = self.input_frame_count * self.framerate_div
+        #Prepare output + output constants
+
+        self.font_pt = floor(self.font_px) #Pixels to font point
+        self.imf_font = ImageFont.truetype(self.font_name, self.font_pt)
+        tmp_draw = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+        self.font_size = (ceil(tmp_draw.textlength('f', self.imf_font)), self.font_px+2)
+        self.chars_per_size = [int(self.output_resolution[d] / self.font_size[d]) for d in range(2)]
+        self.prerendered_text = []
+        print(self.font_size)
+        for char in self.output_characters:
+            canvas = Image.new("RGBA", self.font_size, color='white')
+            drw = ImageDraw.Draw(canvas)
+            drw.text((0, 0), char, fill=(0, 0, 0), font=self.imf_font)
+            self.prerendered_text.append(np.array(canvas))
+            # print(char+'.png')
+            # canvas.save('-'+char+'-.png')
+        #Prepare text things + prerender text
+    
+    def multiframe_render(self):
+        # self.image_queue = mp.Queue()
+        # out_thread = threading.Thread(target=self.render_assemble, args=(self.image_queue,))
+        # out_thread.start()
+        framenumber = -1
+        tmp_container = {}
+        assembled_frames = 0
+        thread_frames = []
+        print(self.output_frame_count)
+        with mp.Pool(processes=self.threads) as thread_pool:
+            while framenumber <= self.output_frame_count:
+                framenumber += 1
+                print(framenumber)
+                print("!", framenumber % self.framerate_div, self.framerate_div)
+                success, current_frame = self.video_source.read()
+                # print(type(current_frame))
+                if framenumber % self.framerate_div != 0:
+                    print(self.framerate_div)
+                    print("Skipping frame")
+                    continue
+                # print(type(current_frame), framenumber)
+                thread_frames.append([current_frame, framenumber, self.output_resolution, self.font_size, self.prerendered_text, self.chars_per_size])
+                if len(thread_frames) == self.threads:
+                    it = thread_pool.map_async(self._return_image, thread_frames)
+                    for output_data in it.get():
+                        fnum, output = output_data
+                        if output is not None:
+                            tmp_container[fnum] = output
+                        if assembled_frames in tmp_container.keys():
+                            print('writing', assembled_frames)
+                            self.video_output.write(tmp_container[assembled_frames])
+                            assembled_frames += 1
+                            del tmp_container[fnum]
+                    thread_frames = []
+        print(framenumber, assembled_frames)
+        self.video_output.release()
+        self.video_source.release()
+
+    @staticmethod
+    def _return_image(framed):
+        frame, frameno, output_resolution, font_size, prerendered_text, cps = framed
+        print("rendering", frameno, 'at', time.time())
+        if frame is None:
+            return [frameno, None]
+        scaled_data = cv2.resize(frame, cps)
+        recolored = cv2.cvtColor(scaled_data, cv2.COLOR_BGR2GRAY)
+        vals = np.rint((recolored/255)*(len(prerendered_text)-1)).astype(int)
+        # nframe = np.array(Image.new("RGBA", output_resolution, color=(0, 0, 0)))
+        outframe = np.zeros((*output_resolution, 4), dtype=np.uint8)
+        for rindex, row in enumerate(vals):
+            for cindex, pix in enumerate(row):
+                # print(font_size)
+                assert font_size[::-1] == prerendered_text[pix].shape[:-1]
+                # print(font_size, prerendered_text[pix].shape)
+                print(cindex*font_size[1],(cindex+1)*font_size[1], rindex*font_size[0],(rindex+1)*font_size[0], output_resolution, font_size)
+                # try:
+                outframe[cindex*font_size[1]:(cindex+1)*font_size[1], rindex*font_size[0]:(rindex+1)*font_size[0]] = prerendered_text[pix]
+                # except:
+                #     print("Block broken:", rindex, cindex)
+                #     continue
+
+        # frame = np.vectorize(lambda x: progargs.charset[x])(np.rint((frame/255)*(len(progargs.charset)-1)).astype(int))
+        # frame = np.repeat(frame, 2, axis=1)
+        # frame = np.insert(frame, frame.shape[1],'\n',axis=1)
+        # outstr = "".join(frame.flatten())
+        # draw.text((0, 0),outstr,(255,255,255),font=video_font)
+        # return cv2.cvtColor(np.array(nframe), cv2.COLOR_RGB2BGR)
+        # print(type(scaled_d                    print(it)
+        # ata))
+        # time.sleep(1)
+        return [frameno, cv2.cvtColor(outframe, cv2.COLOR_RGBA2BGR)]
+        return
+    
+    # def render_assemble(self, queue):
+    #     while assembled_frames <= self.output_frame_count:
+    #         fnum, output = queue.get()
+    #         print("Recieved frame #", fnum)
+    #         tmp_container[fnum] = output
+    #         if assembled_frames in tmp_container.keys():
+    #             self.video_output.write(tmp_container[assembled_frames])
+    #             assembled_frames += 1
+    #             del tmp_container[fnum]
+        self.video_output.release()
+        self.video_source.release()
+
+
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser("Vid2Ascii")
+    parser.add_argument('-r', '--framerate', type=int, default=30)
+    parser.add_argument('-f', '--font', type=str, default="Hack-Regular")
+    parser.add_argument('-x', '--text-size', type=int, default=20)
+    parser.add_argument('-s', '--size', type=lambda s: tuple(s.split("x")), default=None)
+    parser.add_argument('-c', '--characters', type=str, default=" .:-=+*#%@")
+    parser.add_argument('-d', '--codec', type=lambda s: s.upper(), choices=['DIVX', 'MP4V'], default='DIVX') #https://www.fourcc.org/codecs.php
+    parser.add_argument('-t', '--threads', type=int, default=mp.cpu_count())
+    # parser.add_argument('infile')
+    # parser.add_argument('outfile')
+
+    arguments = parser.parse_args()
+    arguments.infile = '/home/infinusa/Videos/tb.mp4'
+    arguments.outfile = 'test.avi'
+    # arguments.size = (240, 180)
+    arguments.framerate = 15
+    # arguments.infile = '/home/infinusa/Pictures/games/Genshin Impact/5bensv5wfta61.jpg'
+    # arguments.outfile = 'beans.png'
+    render_inst = converter(arguments)
+    render_inst.prerender()
+    render_inst.multiframe_render()
